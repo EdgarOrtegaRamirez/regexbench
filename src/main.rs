@@ -120,6 +120,14 @@ enum Commands {
         /// Show match timeline for input
         #[arg(short, long)]
         input: Option<String>,
+
+        /// Output Graphviz DOT format instead of ASCII
+        #[arg(long)]
+        dot: bool,
+
+        /// Show step-by-step DFA match trace
+        #[arg(long)]
+        trace: Option<String>,
     },
 
     /// Interactive REPL for testing patterns
@@ -162,7 +170,16 @@ fn main() -> Result<()> {
             dfa,
             minimize,
             input,
-        } => cmd_visualize(&pattern, dfa, minimize, input.as_deref()),
+            dot,
+            trace,
+        } => cmd_visualize(
+            &pattern,
+            dfa,
+            minimize,
+            input.as_deref(),
+            dot,
+            trace.as_deref(),
+        ),
 
         Commands::Repl => cmd_repl(),
     }
@@ -430,10 +447,17 @@ fn cmd_export(pattern: &str, language: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_visualize(pattern: &str, show_dfa: bool, minimize: bool, input: Option<&str>) -> Result<()> {
+fn cmd_visualize(
+    pattern: &str,
+    show_dfa: bool,
+    minimize: bool,
+    input: Option<&str>,
+    dot: bool,
+    trace: Option<&str>,
+) -> Result<()> {
     let ast = regexbench::parser::RegexParser::parse(pattern)?;
 
-    if show_dfa {
+    if show_dfa || dot || trace.is_some() {
         let nfa = regexbench::nfa::Nfa::from_ast(&ast);
         let mut dfa = regexbench::dfa::Dfa::from_nfa(&nfa);
 
@@ -441,7 +465,21 @@ fn cmd_visualize(pattern: &str, show_dfa: bool, minimize: bool, input: Option<&s
             dfa = dfa.minimize();
         }
 
-        print!("{}", regexbench::visualize::Visualizer::dfa_to_ascii(&dfa));
+        if dot {
+            print!("{}", regexbench::visualize::Visualizer::dfa_to_dot(&dfa));
+        } else {
+            print!("{}", regexbench::visualize::Visualizer::dfa_to_ascii(&dfa));
+        }
+
+        if let Some(trace_input) = trace {
+            println!(
+                "\n{}",
+                regexbench::visualize::Visualizer::format_match_trace(&dfa, trace_input)
+            );
+        }
+    } else if dot {
+        let nfa = regexbench::nfa::Nfa::from_ast(&ast);
+        print!("{}", regexbench::visualize::Visualizer::nfa_to_dot(&nfa));
     } else {
         let nfa = regexbench::nfa::Nfa::from_ast(&ast);
         print!("{}", regexbench::visualize::Visualizer::nfa_to_ascii(&nfa));

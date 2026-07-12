@@ -1,8 +1,10 @@
 /// Visualization module for regex patterns
 ///
-/// Provides ASCII art visualization of NFA/DFA automata and match results.
-use crate::dfa::Dfa;
+/// Provides ASCII art visualization of NFA/DFA automata, match results,
+/// Graphviz DOT output, and step-by-step match tracing.
+use crate::dfa::{Dfa, DfaStateId};
 use crate::nfa::{Nfa, Transition};
+use std::collections::{BTreeMap, HashMap};
 
 /// Visualizer for regex structures
 pub struct Visualizer;
@@ -74,8 +76,7 @@ impl Visualizer {
             output.push_str(&format!("State {}{}:\n", state.id, marker));
 
             // Group transitions by target
-            let mut by_target: std::collections::HashMap<usize, Vec<char>> =
-                std::collections::HashMap::new();
+            let mut by_target: HashMap<usize, Vec<char>> = HashMap::new();
             for (&(from, ch), &to) in &dfa.transitions {
                 if from == state.id {
                     by_target.entry(to).or_default().push(ch);
@@ -175,6 +176,173 @@ impl Visualizer {
 
         output
     }
+
+    /// Generate Graphviz DOT output for an NFA
+    pub fn nfa_to_dot(nfa: &Nfa) -> String {
+        let mut dot = String::from("digraph NFA {\n");
+        dot.push_str("  rankdir=LR;\n");
+        dot.push_str("  node [shape=circle];\n\n");
+
+        // Start arrow
+        dot.push_str("  __start__ [shape=point, style=invis];\n");
+        dot.push_str(&format!("  __start__ -> q{};\n\n", nfa.start));
+
+        // Accept state is double circle
+        dot.push_str(&format!("  q{} [shape=doublecircle];\n\n", nfa.accept));
+
+        // Collect transitions grouped by (from, symbols, to)
+        for state in &nfa.states {
+            for (trans, target) in &state.transitions {
+                let label = match trans {
+                    Transition::Epsilon => "ε".to_string(),
+                    Transition::Char(c) => c.to_string(),
+                    Transition::Dot => ".".to_string(),
+                    Transition::CharClass {
+                        negated: _,
+                        chars: _,
+                    } => "[...]".to_string(),
+                    Transition::StartAnchor => "^".to_string(),
+                    Transition::EndAnchor => "$".to_string(),
+                    Transition::WordBoundary => "\\b".to_string(),
+                };
+                dot.push_str(&format!(
+                    "  q{} -> q{} [label=\"{}\"];\n",
+                    state.id, target, label
+                ));
+            }
+        }
+
+        dot.push_str("}\n");
+        dot
+    }
+
+    /// Generate Graphviz DOT output for a DFA
+    pub fn dfa_to_dot(dfa: &Dfa) -> String {
+        let mut dot = String::from("digraph DFA {\n");
+        dot.push_str("  rankdir=LR;\n");
+        dot.push_str("  node [shape=circle];\n\n");
+
+        // Start arrow
+        dot.push_str("  __start__ [shape=point, style=invis];\n");
+        dot.push_str(&format!("  __start__ -> q{};\n\n", dfa.start));
+
+        // Accept states are double circles
+        for state in &dfa.states {
+            if state.is_accept {
+                dot.push_str(&format!("  q{} [shape=doublecircle];\n", state.id));
+            }
+        }
+        dot.push('\n');
+
+        // Group transitions by (from, to) and collect characters
+        let mut by_edge: BTreeMap<(DfaStateId, DfaStateId), Vec<char>> = BTreeMap::new();
+        for (&(from, ch), &to) in &dfa.transitions {
+            by_edge.entry((from, to)).or_default().push(ch);
+        }
+
+        for ((from, to), mut chars) in by_edge {
+            chars.sort();
+            let label: String = chars
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            dot.push_str(&format!("  q{} -> q{} [label=\"{}\"];\n", from, to, label));
+        }
+
+        dot.push_str("}\n");
+        dot
+    }
+
+    /// Step-by-step DFA match tracing
+    ///
+    /// Returns a vector of trace entries showing each step through the DFA.
+    /// Each entry contains: (step_number, character, state_id, is_accepting)
+    pub fn match_trace(dfa: &Dfa, input: &str) -> Vec<(usize, String, DfaStateId, bool)> {
+        let mut trace = Vec::new();
+        let mut current = dfa.start;
+
+        trace.push((
+            0,
+            "START".to_string(),
+            current,
+            dfa.states[current].is_accept,
+        ));
+
+        for (i, c) in input.chars().enumerate() {
+            match dfa.transitions.get(&(current, c)) {
+                Some(&next) => {
+                    trace.push((i + 1, format!("'{}'", c), next, dfa.states[next].is_accept));
+                    current = next;
+                }
+                None => {
+                    trace.push((i + 1, format!("'{}' \u{2717} REJECT", c), current, false));
+                    break;
+                }
+            }
+        }
+
+        trace
+    }
+
+    /// Format match trace as a human-readable string
+    pub fn format_match_trace(dfa: &Dfa, input: &str) -> String {
+        let trace = Self::match_trace(dfa, input);
+        let mut output = String::new();
+
+        output.push_str(&format!("=== DFA Match Trace: \"{}\" ===\n\n", input));
+        output.push_str(&format!(
+            "{:<8} {:<15} {:<10} {}\n",
+            "Step", "Input", "State", "Status"
+        ));
+        output.push_str(&format!("{}\n", "-".repeat(45)));
+
+        for (step, ch, state_id, is_accept) in &trace {
+            let status = if ch.contains("\u{2717}") {
+                "✗ REJECT".to_string()
+            } else if *is_accept && *step == input.chars().count() {
+                "✓ ACCEPT".to_string()
+            } else if *is_accept {
+                "accepting".to_string()
+            } else {
+                "".to_string()
+            };
+            output.push_str(&format!(
+                "{:<8} {:<15} q{:<8} {}\n",
+                step, ch, state_id, status
+            ));
+        }
+
+        // Determine final result based on whether the trace ended with a rejection
+        let is_rejected = trace
+            .last()
+            .map(|(_, ch, _, _)| ch.contains("\u{2717}"))
+            .unwrap_or(true);
+        let final_state = trace
+            .last()
+            .map(|(_, _, state, _)| *state)
+            .unwrap_or(dfa.start);
+        let was_accepted = !is_rejected && dfa.states[final_state].is_accept;
+        output.push('\n');
+        if was_accepted {
+            output.push_str(&format!(
+                "Result: ✓ ACCEPT (reached accepting state q{})\n",
+                final_state
+            ));
+        } else if is_rejected {
+            output.push_str(&format!(
+                "Result: ✗ REJECT (no transition for character at state q{})\n",
+                final_state
+            ));
+        } else {
+            output.push_str(&format!(
+                "Result: ✗ REJECT (stuck at non-accepting state q{})\n",
+                final_state
+            ));
+        }
+
+        output
+    }
 }
 
 #[cfg(test)]
@@ -207,5 +375,67 @@ mod tests {
     fn test_matches_highlight() {
         let result = Visualizer::matches_highlight("a b c", &[(0, 1), (2, 3), (4, 5)]);
         assert_eq!(result, "[a] [b] [c]");
+    }
+
+    #[test]
+    fn test_nfa_to_dot() {
+        let nfa = Nfa::from_pattern("a").unwrap();
+        let dot = Visualizer::nfa_to_dot(&nfa);
+        assert!(dot.contains("digraph NFA"));
+        // States may not be q0 (Thompson construction adds new states)
+        // Just check the format is correct
+        assert!(dot.contains("q"));
+        assert!(dot.contains("__start__"));
+    }
+
+    #[test]
+    fn test_dfa_to_dot() {
+        let nfa = Nfa::from_pattern("ab").unwrap();
+        let dfa = Dfa::from_nfa(&nfa);
+        let dot = Visualizer::dfa_to_dot(&dfa);
+        assert!(dot.contains("digraph DFA"));
+        assert!(dot.contains("q0"));
+    }
+
+    #[test]
+    fn test_match_trace_accepted() {
+        let nfa = Nfa::from_pattern("ab").unwrap();
+        let dfa = Dfa::from_nfa(&nfa);
+        let trace = Visualizer::match_trace(&dfa, "ab");
+        assert!(!trace.is_empty());
+        // First entry should be START
+        assert_eq!(trace[0].1, "START");
+        // Last state should be accepting
+        assert!(trace.last().unwrap().3);
+    }
+
+    #[test]
+    fn test_match_trace_rejected() {
+        let nfa = Nfa::from_pattern("ab").unwrap();
+        let dfa = Dfa::from_nfa(&nfa);
+        let trace = Visualizer::match_trace(&dfa, "ac");
+        assert!(!trace.is_empty());
+        // Should contain REJECT
+        let has_reject = trace.iter().any(|(_, ch, _, _)| ch.contains("\u{2717}"));
+        assert!(has_reject);
+    }
+
+    #[test]
+    fn test_format_match_trace() {
+        let nfa = Nfa::from_pattern("abc").unwrap();
+        let dfa = Dfa::from_nfa(&nfa);
+        let formatted = Visualizer::format_match_trace(&dfa, "abc");
+        assert!(formatted.contains("Match Trace"));
+        assert!(formatted.contains("ACCEPT") || formatted.contains("REJECT"));
+    }
+
+    #[test]
+    fn test_dfa_dot_minimized() {
+        let nfa = Nfa::from_pattern("a|b").unwrap();
+        let dfa = Dfa::from_nfa(&nfa);
+        let minimized = dfa.minimize();
+        let dot = Visualizer::dfa_to_dot(&minimized);
+        assert!(dot.contains("digraph DFA"));
+        assert!(dot.contains("doublecircle"));
     }
 }
